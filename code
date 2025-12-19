@@ -64,9 +64,8 @@ def search_web(query):
     except Exception as e:
         return [{"error": str(e)}]
 
-# ------------------------------
 # 2. ANALYSE IA (MISTRAL)
-# ------------------------------
+
 
 def ask_mistral(question):
     web_results = search_web(question)
