@@ -13,8 +13,8 @@ from reportlab.pdfgen import canvas
 # CONFIGURATION
 
 
-TAVILY_KEY = "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"
-MISTRAL_KEY = "SxPUgCYNxcS0a0jFsEzaOq3Opqc8CFth"
+TAVILY_KEY = "votre_cle_tavily"
+MISTRAL_KEY = "votre_cle_mistal"
 
 API_URL = "https://api.mistral.ai/v1/chat/completions"
 tavily = TavilyClient(api_key=TAVILY_KEY)
