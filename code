@@ -1,0 +1,380 @@
+import tkinter as tk
+from tkinter import scrolledtext, filedialog, messagebox
+import re
+import requests
+import webbrowser
+from PIL import Image, ImageTk
+import json
+from tavily import TavilyClient
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+
+
+# CONFIGURATION
+
+
+TAVILY_KEY = "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"
+MISTRAL_KEY = "SxPUgCYNxcS0a0jFsEzaOq3Opqc8CFth"
+
+API_URL = "https://api.mistral.ai/v1/chat/completions"
+tavily = TavilyClient(api_key=TAVILY_KEY)
+
+TRUSTED_DOMAINS = [
+    'linkedin.com', 'wikipedia.org', 'gouv.fr', 'gov', 'edu', 'univ', 'cnrs.fr'
+]
+
+def verdict_from_reliability(score, trusted, total):
+    if total == 0:
+        return "❌ FAUX (aucune source disponible)"
+
+    if trusted >= 2 and score >= 60:
+        return "✅ CONFIRMÉ par des sources fiables"
+
+    if trusted == 0:
+        return "❌ FAUX (sources non fiables)"
+
+    return "⚠️ NON PROUVÉ (informations insuffisantes)"
+
+# VALIDATION URL
+
+def is_valid_url(url):
+    return url.startswith("https://")
+
+def is_trusted_url(url):
+    return any(domain in url for domain in TRUSTED_DOMAINS)
+
+def is_url_accessible(url):
+    try:
+        r = requests.head(url, timeout=5, allow_redirects=True, verify=True)
+        return r.status_code == 200
+    except:
+        return False
+
+# 1. RECHERCHE INTERNET (TAVILY)
+
+
+def search_web(query):
+    try:
+        results = tavily.search(
+            query=query,
+            max_results=5,
+            include_domains=None
+        )
+        return results["results"]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+# ------------------------------
+# 2. ANALYSE IA (MISTRAL)
+# ------------------------------
+
+def ask_mistral(question):
+    web_results = search_web(question)
+
+    headers = {
+        "Authorization": f"Bearer {MISTRAL_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": "mistral-small-latest",
+        "messages": [
+            {
+                "role": "system",
+                "content": """
+Tu es un assistant expert en vérification d'informations.
+Tu travailles uniquement à partir des résultats de recherche ci-dessous.
+Tu n'inventes jamais de faits.
+À la fin de ton analyse, tu dois OBLIGATOIREMENT fournir
+une conclusion explicite parmi les trois suivantes :
+- VRAI
+- FAUX
+- NON PROUVÉ
+Tu dois choisir UNE seule option, sans ambiguïté.
+Structure la réponse en sections claires :
+- Résumé général
+- Analyse des faits
+- Ce qui est confirmé / infirmé
+- Sources vérifiées
+                """
+            },
+            {
+                "role": "user",
+                "content": f"""
+Voici les résultats trouvés sur Internet :
+
+{json.dumps(web_results, indent=2, ensure_ascii=False)}
+
+Question : {question}
+
+Analyse ces informations et répond de façon rigoureuse.
+                """
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(API_URL, json=data, headers=headers)
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"❌ Erreur API : {e}"
+
+# FORMATAGE DU TEXTE
+
+
+def format_text_in_widget(widget, text):
+    widget.delete("1.0", tk.END)
+
+    url_pattern = re.compile(r'(https?://[^\s]+)')
+    bold_pattern = re.compile(r'\*\*(.*?)\*\*')
+
+    sections = re.split(r'(## .*?\n)', text)
+
+    for sec in sections:
+        if sec.startswith("## "):
+            title = sec.replace("##", "").strip()
+            widget.insert(tk.END, f"\n🔹 {title}\n", "section_title")
+        else:
+            format_block(widget, sec, url_pattern, bold_pattern)
+
+def format_block(widget, text, url_pattern, bold_pattern):
+    parts = bold_pattern.split(text)
+
+    for part in parts:
+        if bold_pattern.match(f"**{part}**"):
+            widget.insert(tk.END, part, "bold")
+        else:
+            format_urls(widget, part, url_pattern)
+
+def format_urls(widget, text, url_pattern):
+    segments = url_pattern.split(text)
+    for seg in segments:
+        if url_pattern.match(seg):
+            url = seg
+            if is_valid_url(url) and is_trusted_url(url):
+                if is_url_accessible(url):
+                    widget.insert(tk.END, "[Source] ", "link")
+                    widget.insert(tk.END, url + "\n", ("url", "link"))
+                else:
+                    widget.insert(tk.END, f"⚠️ Lien inaccessible : {url}\n", "warning")
+            else:
+                widget.insert(tk.END, f"⚠️ Source non fiable : {url}\n", "warning")
+        else:
+            widget.insert(tk.END, seg)
+
+
+# OUVERTURE DES LIENS
+
+
+def open_url(widget, event):
+    index = widget.index(f"@{event.x},{event.y}")
+    tags = widget.tag_names(index)
+    if "url" in tags:
+        line = widget.get(index + " linestart", index + " lineend")
+        url = re.search(r'https?://[^\s]+', line).group(0)
+        webbrowser.open(url)
+
+
+# EXPORT TXT / PDF
+
+
+def export_txt():
+    content = output_box.get("1.0", tk.END).strip()
+    if not content:
+        messagebox.showwarning("Attention", "Aucun contenu à sauvegarder.")
+        return
+
+    file_path = filedialog.asksaveasfilename(
+        defaultextension=".txt",
+        filetypes=[("Fichier texte", "*.txt")]
+    )
+
+    if not file_path:
+        return
+
+    question = question_entry.get().strip()
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        # -------- EN-TÊTE --------
+        f.write("=" * 50 + "\n")
+        f.write("ASSISTANT WEB IA – RECHERCHE FIABLE\n")
+        f.write("=" * 50 + "\n\n")
+
+        # -------- QUESTION --------
+        f.write("Question :\n")
+        f.write(question + "\n\n")
+
+        # -------- CONTENU --------
+        for line in content.split("\n"):
+            line_clean = line.strip()
+
+            if not line_clean:
+                f.write("\n")
+                continue
+
+            # Détection des sections
+            if "Résumé" in line_clean or \
+               "Analyse" in line_clean or \
+               "confirmé" in line_clean or \
+               "Sources" in line_clean:
+                f.write("\n" + "-" * 40 + "\n")
+                f.write(line_clean.upper() + "\n")
+                f.write("-" * 40 + "\n")
+            else:
+                f.write(line_clean + "\n")
+
+    messagebox.showinfo("Succès", "Fichier TXT sauvegardé avec succès.")
+
+def export_pdf():
+    content = output_box.get("1.0", tk.END).strip()
+    if not content:
+        messagebox.showwarning("Attention", "Aucun contenu à sauvegarder.")
+        return
+
+    file_path = filedialog.asksaveasfilename(
+        defaultextension=".pdf",
+        filetypes=[("Fichier PDF", "*.pdf")]
+    )
+
+    if not file_path:
+        return
+
+    c = canvas.Canvas(file_path, pagesize=A4)
+    width, height = A4
+
+    x_margin = 50
+    y = height - 50
+
+    # -------- TITRE --------
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(x_margin, y, "Assistant Web IA – Recherche Fiable")
+    y -= 30
+
+    # -------- QUESTION --------
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(x_margin, y, "Question posée :")
+    y -= 15
+
+    c.setFont("Helvetica", 10)
+    question = question_entry.get().strip()
+    for line in wrap_text(question, 90):
+        c.drawString(x_margin, y, line)
+        y -= 14
+
+    y -= 20
+
+    # -------- CONTENU --------
+    for line in content.split("\n"):
+        if y < 50:
+            c.showPage()
+            y = height - 50
+            c.setFont("Helvetica", 10)
+
+        # Titres de sections
+        if line.strip().startswith("Résumé") or \
+           line.strip().startswith("Analyse") or \
+           line.strip().startswith("Ce qui est confirmé") or \
+           line.strip().startswith("Sources"):
+            y -= 10
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(x_margin, y, line.strip())
+            y -= 18
+            c.setFont("Helvetica", 10)
+
+        else:
+            for subline in wrap_text(line, 100):
+                c.drawString(x_margin, y, subline)
+                y -= 14
+
+    c.save()
+    messagebox.showinfo("Succès", "Fichier PDF sauvegardé avec succès.")
+
+def wrap_text(text, max_chars):
+    words = text.split()
+    lines = []
+    current_line = ""
+
+    for word in words:
+        if len(current_line) + len(word) + 1 <= max_chars:
+            current_line += word + " "
+        else:
+            lines.append(current_line)
+            current_line = word + " "
+
+    if current_line:
+        lines.append(current_line)
+
+    return lines
+
+
+# ACTION DU BOUTON
+
+def on_send():
+    question = question_entry.get().strip()
+    if not question:
+        return
+    response = ask_mistral(question)
+    format_text_in_widget(output_box, response)
+
+
+# INTERFACE TKINTER
+
+
+app = tk.Tk()
+app.title("Assistant Web IA – Recherche Fiable")
+app.geometry("800x650")
+app.configure(bg="#243447")
+
+label_question = tk.Label(
+    app, text="Pose ta question :", font=("Arial", 16),
+    bg="#243447", fg="#55D5E0"
+)
+label_question.pack(pady=10)
+
+question_entry = tk.Entry(
+    app, font=("Arial", 14), width=60,
+    bg="#2F4558", fg="white", insertbackground="white"
+)
+question_entry.pack(pady=5)
+
+send_button = tk.Button(
+    app, text="Recherche",
+    font=("Arial", 14), bg="#F6B12D", fg="#243447",
+    command=on_send
+)
+send_button.pack(pady=10)
+
+export_frame = tk.Frame(app, bg="#243447")
+export_frame.pack(pady=5)
+
+btn_txt = tk.Button(
+    export_frame, text="Exporter TXT",
+    font=("Arial", 12), bg="#55D5E0", fg="#243447",
+    command=export_txt
+)
+btn_txt.pack(side=tk.LEFT, padx=10)
+
+btn_pdf = tk.Button(
+    export_frame, text="Exporter PDF",
+    font=("Arial", 12), bg="#55D5E0", fg="#243447",
+    command=export_pdf
+)
+btn_pdf.pack(side=tk.LEFT, padx=10)
+
+output_box = scrolledtext.ScrolledText(
+    app, font=("Arial", 13), width=90, height=25,
+    bg="#2F4558", fg="white", insertbackground="white",
+    wrap=tk.WORD
+)
+output_box.pack(pady=10)
+
+output_box.tag_config("section_title", font=("Arial", 14, "bold"), foreground="#55D5E0")
+output_box.tag_config("bold", font=("Arial", 13, "bold"), foreground="white")
+output_box.tag_config("link", foreground="cyan", underline=True)
+output_box.tag_config("url", foreground="cyan")
+output_box.tag_config("warning", foreground="orange")
+
+output_box.tag_bind("url", "<Button-1>", lambda e: open_url(output_box, e))
+
+app.mainloop()
